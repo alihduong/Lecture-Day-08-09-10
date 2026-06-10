@@ -20,6 +20,7 @@ ALLOWED_DOC_IDS = frozenset(
         "sla_p1_2026",
         "it_helpdesk_faq",
         "hr_leave_policy",
+        "access_control_sop",  # thêm vào để embed đủ dữ liệu cho gq_d10_10
     }
 )
 
@@ -70,13 +71,16 @@ def clean_rows(
     """
     Trả về (cleaned, quarantine).
 
-    Baseline (mở rộng theo narrative Day 10):
+    Rules (baseline + mở rộng):
     1) Quarantine: doc_id không thuộc allowlist (export lạ / catalog sai).
     2) Chuẩn hoá effective_date sang YYYY-MM-DD; quarantine nếu không parse được.
-    3) Quarantine: chunk hr_leave_policy có effective_date < 2026-01-01 (bản HR cũ / conflict version).
-    4) Quarantine: chunk_text rỗng hoặc effective_date rỗng sau chuẩn hoá.
-    5) Loại trùng nội dung chunk_text (giữ bản đầu).
-    6) Fix stale refund: policy_refund_v4 chứa '14 ngày làm việc' → 7 ngày.
+    3) Quarantine: hr_leave_policy có effective_date < 2026-01-01 (bản HR cũ theo ngày).
+    4) [R8 MỚI] Quarantine: chunk bắt đầu bằng "Nội dung không rõ ràng:" (marker dữ liệu mơ hồ từ hệ thống nguồn).
+    5) [R9 MỚI] Quarantine: chunk bắt đầu bằng "!!!" (corruption marker từ export lỗi).
+    6) Quarantine: chunk_text rỗng sau strip.
+    7) [R7 MỚI] Quarantine: hr_leave_policy chứa "10 ngày phép năm" (stale HR 2025, kể cả khi date >= 2026-01-01).
+    8) Loại trùng nội dung chunk_text (giữ bản đầu).
+    9) Fix stale refund: policy_refund_v4 chứa '14 ngày làm việc' → 7 ngày.
     """
     quarantine: List[Dict[str, Any]] = []
     seen_text: set[str] = set()
@@ -89,10 +93,12 @@ def clean_rows(
         eff_raw = raw.get("effective_date", "")
         exported_at = raw.get("exported_at", "")
 
+        # Rule 1: allowlist
         if doc_id not in ALLOWED_DOC_IDS:
             quarantine.append({**raw, "reason": "unknown_doc_id"})
             continue
 
+        # Rule 2: chuẩn hoá ngày
         eff_norm, eff_err = _normalize_effective_date(eff_raw)
         if eff_err == "empty_effective_date":
             quarantine.append({**raw, "reason": "missing_effective_date"})
@@ -101,6 +107,7 @@ def clean_rows(
             quarantine.append({**raw, "reason": eff_err, "effective_date_raw": eff_raw})
             continue
 
+        # Rule 3: HR stale theo ngày (bản 2025)
         if doc_id == "hr_leave_policy" and eff_norm < "2026-01-01":
             quarantine.append(
                 {
@@ -111,8 +118,46 @@ def clean_rows(
             )
             continue
 
-        if not text:
+        # Rule R8 (MỚI): loại bỏ chunk có marker mơ hồ từ hệ thống nguồn.
+        # metric_impact: ~12 rows bị quarantine (data_privacy, sla, it_helpdesk, hr, refund).
+        if text.strip().startswith("Nội dung không rõ ràng:"):
+            quarantine.append(
+                {
+                    **raw,
+                    "reason": "unclear_content_prefix",
+                    "effective_date_normalized": eff_norm,
+                }
+            )
+            continue
+
+        # Rule R9 (MỚI): loại bỏ chunk có dấu hiệu corruption "!!!".
+        # metric_impact: ~3 rows (policy_refund_v4 row 94, data sources khác).
+        if text.strip().startswith("!!!"):
+            quarantine.append(
+                {
+                    **raw,
+                    "reason": "exclamation_corruption_marker",
+                    "effective_date_normalized": eff_norm,
+                }
+            )
+            continue
+
+        # Rule 6: text rỗng
+        if not text.strip():
             quarantine.append({**raw, "reason": "missing_chunk_text"})
+            continue
+
+        # Rule R7 (MỚI): HR 2025 stale content kể cả khi date >= 2026-01-01.
+        # Cần thiết vì nhiều row (vd chunk_id=9, 22, 36…) có date hợp lệ nhưng nội dung sai phiên bản.
+        # metric_impact: 7+ rows bị quarantine mà baseline bỏ qua, sửa E6 halt.
+        if doc_id == "hr_leave_policy" and "10 ngày phép năm" in text:
+            quarantine.append(
+                {
+                    **raw,
+                    "reason": "stale_hr_leave_10d_annual_content",
+                    "effective_date_normalized": eff_norm,
+                }
+            )
             continue
 
         key = _norm_text(text)

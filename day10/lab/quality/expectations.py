@@ -112,5 +112,49 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
         )
     )
 
+    # E7 (MỚI): không còn chunk nào chứa prefix "Nội dung không rõ ràng:" sau clean
+    bad_unclear = [
+        r
+        for r in cleaned_rows
+        if (r.get("chunk_text") or "").strip().startswith("Nội dung không rõ ràng:")
+    ]
+    ok7 = len(bad_unclear) == 0
+    results.append(
+        ExpectationResult(
+            "no_unclear_content_prefix",
+            ok7,
+            "halt",
+            f"violations={len(bad_unclear)}",
+        )
+    )
+
+    # E8 (MỚI): không còn chunk nào có corruption marker "!!!" sau clean
+    bad_excl = [
+        r
+        for r in cleaned_rows
+        if (r.get("chunk_text") or "").strip().startswith("!!!")
+    ]
+    ok8 = len(bad_excl) == 0
+    results.append(
+        ExpectationResult(
+            "no_exclamation_prefix",
+            ok8,
+            "halt",
+            f"violations={len(bad_excl)}",
+        )
+    )
+
+    # E9 (MỚI): access_control_sop phải có ít nhất 1 chunk (cần cho grading gq_d10_10)
+    acl_count = sum(1 for r in cleaned_rows if r.get("doc_id") == "access_control_sop")
+    ok9 = acl_count >= 1
+    results.append(
+        ExpectationResult(
+            "access_control_sop_present",
+            ok9,
+            "halt",
+            f"access_control_sop_count={acl_count}",
+        )
+    )
+
     halt = any(not r.passed and r.severity == "halt" for r in results)
     return results, halt
